@@ -14,7 +14,7 @@ Fuzzy Freeway is a simple browser driving game built in a single `index.html` fi
 
 ## How To Play
 
-1. Open `index.html` in a web browser.
+1. Visit joeymgithub.com/github.io/fuzzy-freeway 
 2. Press **Drive** to start.
 3. Move left and right to avoid traffic.
 4. Survive as long as possible while your speed keeps climbing.
