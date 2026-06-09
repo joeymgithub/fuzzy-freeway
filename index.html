@@ -218,7 +218,54 @@ const Sound = {
     const og = this.ctx.createGain(); og.gain.setValueAtTime(0.4, this.ctx.currentTime); og.gain.exponentialRampToValueAtTime(0.0001, this.ctx.currentTime + 0.4);
     o.connect(og); og.connect(this.master); o.start(); o.stop(this.ctx.currentTime + 0.4);
   },
-  setMuted(m) { this.muted = m; if (this.master) this.master.gain.value = m ? 0 : 1; }
+  setMuted(m) { this.muted = m; if (this.master) this.master.gain.value = m ? 0 : 1; },
+  // birds: a few short high chirps
+  birds() {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    for (let k = 0; k < 5; k++) {
+      const t = now + k * 0.18 + Math.random() * 0.05;
+      const o = this.ctx.createOscillator(); o.type = 'sine';
+      const f = 1800 + Math.random() * 1400;
+      o.frequency.setValueAtTime(f, t); o.frequency.linearRampToValueAtTime(f * 1.3, t + 0.06);
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.05, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.1);
+      o.connect(g); g.connect(this.master); o.start(t); o.stop(t + 0.12);
+    }
+  },
+  // dopplered radio burst from a passing car (~1.5s)
+  radioPass() {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime, dur = 1.5;
+    // a couple of detuned tones to suggest muffled music, panned across with a pitch bend (doppler)
+    const pan = this.ctx.createStereoPanner ? this.ctx.createStereoPanner() : null;
+    const out = this.ctx.createGain();
+    out.gain.setValueAtTime(0.0001, now);
+    out.gain.linearRampToValueAtTime(0.12, now + dur * 0.4);   // approach (louder)
+    out.gain.linearRampToValueAtTime(0.0001, now + dur);        // recede
+    if (pan) {
+      pan.pan.setValueAtTime(-0.8, now);
+      pan.pan.linearRampToValueAtTime(0.8, now + dur);          // sweep left->right
+      out.connect(pan); pan.connect(this.master);
+    } else {
+      out.connect(this.master);
+    }
+    // muffled "music": low-pass filtered detuned saws with a beat-like tremolo
+    const lp = this.ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900;
+    lp.connect(out);
+    [110, 138, 165].forEach((f, i) => {
+      const o = this.ctx.createOscillator(); o.type = 'sawtooth';
+      // doppler: pitch drops as it passes
+      o.frequency.setValueAtTime(f * 1.06, now);
+      o.frequency.linearRampToValueAtTime(f * 0.94, now + dur);
+      const g = this.ctx.createGain(); g.gain.value = 0.5 - i * 0.12;
+      o.connect(g); g.connect(lp); o.start(now); o.stop(now + dur);
+    });
+    // tremolo to fake a beat
+    const trem = this.ctx.createOscillator(); trem.type = 'sine'; trem.frequency.value = 4;
+    const tremGain = this.ctx.createGain(); tremGain.gain.value = 0.4;
+    trem.connect(tremGain); tremGain.connect(out.gain); trem.start(now); trem.stop(now + dur);
+  }
 };
 
 const player = { lane: 1, x: laneX(1), y: H - 130, w: 46, h: 70, vx: 0, lean: 0 };
@@ -232,15 +279,19 @@ function reset() {
     billboards: [], billboardTimer: 700, billboardBag: [],
     trees: [], treeTimer: 120,
     flyovers: [], flyoverTimer: 1400,
+    bridges: [], bridgeTimer: 2000,
     hornTimer: (5 + Math.random() * 5) * 60,
     rain: 0, raindrops: [], puddles: [], puddleTimer: 60,
     sun: 1, storm: 0,
-    ltTimer: 30, ltFlash: 0, ltBolt: null
+    ltTimer: 30, ltFlash: 0, ltBolt: null,
+    birdTimer: 240
   };
   player.lane = 1; player.x = laneX(1); player.vx = 0; player.lean = 0;
 }
 
 const VEHICLE_SPEED = 0.7;
+// per-lane drift: left lane slowest (falls back fastest), right lane fastest (lingers)
+const LANE_SPEED = [0.78, 0.7, 0.62];
 const VEHICLE_TYPES = [
   { type: 'car',   w: 38, h: 64,  colors: ['#e0526d','#46b2e0','#8e6fe0','#e0a23c'] },
   { type: 'van',   w: 42, h: 78,  colors: ['#d8d2c4','#5c9ed6','#c75c8a'] },
@@ -369,6 +420,15 @@ function update() {
     }
   }
 
+  // ambient birdsong when it's not stormy/rainy
+  if (Math.max(state.rain, state.storm) < 0.15) {
+    state.birdTimer -= 1;
+    if (state.birdTimer <= 0) {
+      Sound.birds();
+      state.birdTimer = 360 + Math.random() * 540;
+    }
+  }
+
   // player lane + lean
   const tx = laneX(player.lane);
   const prevX = player.x;
@@ -384,20 +444,27 @@ function update() {
   // billboards
   state.billboardTimer -= sp;
   if (state.billboardTimer <= 0) {
-    let side = Math.random() < 0.5 ? 0 : 1;
-    const treeClash = (s) => state.trees.some(t => t.side === s && Math.abs(t.y - (-90)) < 130);
-    if (treeClash(side) && !treeClash(side ? 0 : 1)) side = side ? 0 : 1;
-    state.trees = state.trees.filter(t => !(t.side === side && Math.abs(t.y - (-90)) < 130));
-    if (state.billboardBag.length === 0) {
-      state.billboardBag = [['CUVVA'], ['GET', 'CUVVA'], ['CUVVA', 'INSURANCE'], ['CUVVA.COM']];
-      for (let i = state.billboardBag.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [state.billboardBag[i], state.billboardBag[j]] = [state.billboardBag[j], state.billboardBag[i]];
+    // don't spawn a billboard where a bridge/flyover would cover it
+    const structNearTop = state.bridges.some(b => b.y < 60 && b.y + b.h > -120) ||
+                          state.flyovers.some(f => f.y < 60 && f.y + f.h > -120);
+    if (structNearTop) {
+      state.billboardTimer = 60; // wait a beat, try again soon
+    } else {
+      let side = Math.random() < 0.5 ? 0 : 1;
+      const treeClash = (s) => state.trees.some(t => t.side === s && Math.abs(t.y - (-90)) < 130);
+      if (treeClash(side) && !treeClash(side ? 0 : 1)) side = side ? 0 : 1;
+      state.trees = state.trees.filter(t => !(t.side === side && Math.abs(t.y - (-90)) < 130));
+      if (state.billboardBag.length === 0) {
+        state.billboardBag = [['CUVVA'], ['GET', 'CUVVA'], ['CUVVA', 'INSURANCE'], ['CUVVA.COM']];
+        for (let i = state.billboardBag.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [state.billboardBag[i], state.billboardBag[j]] = [state.billboardBag[j], state.billboardBag[i]];
+        }
       }
+      const msg = state.billboardBag.pop();
+      state.billboards.push({ y: -90, side, msg });
+      state.billboardTimer = 900 + Math.random() * 600;
     }
-    const msg = state.billboardBag.pop();
-    state.billboards.push({ y: -90, side, msg });
-    state.billboardTimer = 900 + Math.random() * 600;
   }
   state.billboards.forEach(b => { b.y += sp; });
   state.billboards = state.billboards.filter(b => b.y < H + 120);
@@ -415,21 +482,75 @@ function update() {
 
   // flyovers
   state.flyoverTimer -= sp;
-  if (state.flyoverTimer <= 0 && state.flyovers.length === 0) {
-    state.flyovers.push({ y: -110, h: 90 });
+  if (state.flyoverTimer <= 0 && state.flyovers.length === 0 && state.bridges.length === 0) {
+    const fh = 90;
+    const cars = [];
+    const palette = ['#cf5b6f','#5b9ccf','#e0a23c','#7bbf6a'];
+    [{ dir: 1, lc: fh * 0.27 }, { dir: -1, lc: fh * 0.73 }].forEach(lane => {
+      const count = 2 + Math.floor(Math.random() * 2);
+      const spd = 1.2 + Math.random() * 1.4;
+      const span = W + 60;
+      const gap = span / count;
+      const base = Math.random() * gap - 30;
+      for (let i = 0; i < count; i++) {
+        cars.push({ x: base + i * gap, ry: lane.lc + (Math.random() - 0.5) * 8, dir: lane.dir, spd, color: palette[Math.floor(Math.random() * palette.length)] });
+      }
+    });
+    state.flyovers.push({ y: -110, h: fh, cars });
     state.flyoverTimer = 2600 + Math.random() * 2600;
+    state.bridgeTimer = Math.max(state.bridgeTimer, 1600); // keep a gap before a bridge
   }
-  state.flyovers.forEach(f => { f.y += sp; });
+  state.flyovers.forEach(f => {
+    f.y += sp;
+    f.cars.forEach(c => {
+      c.x += c.dir * c.spd;
+      if (c.x > W + 30) c.x -= (W + 60);
+      if (c.x < -30) c.x += (W + 60);
+    });
+  });
   state.flyovers = state.flyovers.filter(f => f.y < H + 160);
+
+  // bridges: our road becomes an overpass above a crossing road
+  state.bridgeTimer -= sp;
+  if (state.bridgeTimer <= 0 && state.bridges.length === 0 && state.flyovers.length === 0) {
+    const h = 120;
+    // cross-traffic in correct lanes: rightbound in the top half,
+    // leftbound in the bottom half (like real two-way traffic)
+    const cars = [];
+    const n = 2 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < n; i++) {
+      const dir = Math.random() < 0.5 ? 1 : -1;
+      const laneCentre = dir > 0 ? h * 0.3 : h * 0.7; // top lane goes right, bottom goes left
+      cars.push({
+        x: Math.random() * W,
+        ry: laneCentre + (Math.random() - 0.5) * 10,
+        dir, spd: 1.2 + Math.random() * 1.4,
+        color: ['#cf5b6f','#5b9ccf','#e0a23c','#7bbf6a'][Math.floor(Math.random()*4)]
+      });
+    }
+    state.bridges.push({ y: -h - 20, h, cars });
+    state.bridgeTimer = 2600 + Math.random() * 2600;
+    state.flyoverTimer = Math.max(state.flyoverTimer, 1600); // keep a gap before a flyover
+  }
+  state.bridges.forEach(b => {
+    b.y += sp;
+    b.cars.forEach(c => {
+      c.x += c.dir * c.spd;
+      // wrap by full span (+60 margin) so even spacing is preserved
+      if (c.x > W + 30) c.x -= (W + 60);
+      if (c.x < -30) c.x += (W + 60);
+    });
+  });
+  state.bridges = state.bridges.filter(b => b.y < H + 60);
 
   // spawn vehicles
   state.spawnTimer -= sp;
   if (state.spawnTimer <= 0) {
     spawnSafe();
-    const base = 250 - (state.mph - MIN_MPH) * 0.15;
-    state.spawnTimer = base + Math.random() * 90;
+    const base = 333 - (state.mph - MIN_MPH) * 0.2;
+    state.spawnTimer = base + Math.random() * 120;
   }
-  state.obstacles.forEach(o => { o.y += sp * VEHICLE_SPEED; });
+  state.obstacles.forEach(o => { o.y += sp * (LANE_SPEED[o.lane] || VEHICLE_SPEED); });
   state.obstacles = state.obstacles.filter(o => o.y < H + 120);
 
   // collisions + near-miss
@@ -545,6 +666,23 @@ function drawVehicle(o) {
 }
 function drawBike(o) {
   const { x, y, w, h, color } = o;
+  const lights = Math.max(state.rain, state.storm);
+  // single small headlight at the front when it's wet
+  if (lights > 0.2) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const topY = y - h/2;
+    const g = ctx.createLinearGradient(0, topY, 0, topY - 55 * lights);
+    g.addColorStop(0, 'rgba(255,245,200,' + (0.3 * lights) + ')');
+    g.addColorStop(1, 'rgba(255,245,200,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(x - 3, topY); ctx.lineTo(x - 14, topY - 55 * lights); ctx.lineTo(x + 14, topY - 55 * lights); ctx.lineTo(x + 3, topY);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+    ctx.fillStyle = 'rgba(255,248,210,' + Math.min(1, lights + 0.3) + ')';
+    ctx.fillRect(x - 2, topY - 1, 4, 3);
+  }
   ctx.save(); ctx.translate(x, y);
   ctx.fillStyle = '#15171d'; roundRect(-3, -h/2, 6, h*0.22, 2); ctx.fill(); roundRect(-3, h/2 - h*0.22, 6, h*0.22, 2); ctx.fill();
   ctx.fillStyle = color; roundRect(-w/2, -h*0.28, w, h*0.5, 4); ctx.fill();
@@ -595,21 +733,66 @@ function draw() {
 
   // billboards
   state.billboards.forEach(b => {
-    const bw = 64, bh = 40;
+    const bw = 84, bh = 54;
     const cx = b.side ? ROAD_RIGHT + (W - ROAD_RIGHT) / 2 : ROAD_LEFT / 2;
     const top = b.y;
-    ctx.fillStyle = '#3a2496'; ctx.fillRect(cx - 16, top + bh, 5, 28); ctx.fillRect(cx + 11, top + bh, 5, 28);
-    ctx.fillStyle = '#EBEBFF'; roundRect(cx - bw/2, top, bw, bh, 5); ctx.fill();
-    ctx.strokeStyle = '#3a2496'; ctx.lineWidth = 3; roundRect(cx - bw/2, top, bw, bh, 5); ctx.stroke();
+    // support posts with cross-strut
+    ctx.fillStyle = '#3a2496';
+    ctx.fillRect(cx - 20, top + bh, 6, 32);
+    ctx.fillRect(cx + 14, top + bh, 6, 32);
+    ctx.fillRect(cx - 20, top + bh + 12, 40, 4); // cross strut
+    // sign panel
+    ctx.fillStyle = '#EBEBFF';
+    roundRect(cx - bw/2, top, bw, bh, 6); ctx.fill();
+    // purple header strip
+    ctx.fillStyle = '#6544E2';
+    roundRect(cx - bw/2, top, bw, 11, 6); ctx.fill();
+    ctx.fillRect(cx - bw/2, top + 6, bw, 5); // square off bottom of header
+    // outer + inner border
+    ctx.strokeStyle = '#3a2496'; ctx.lineWidth = 3;
+    roundRect(cx - bw/2, top, bw, bh, 6); ctx.stroke();
+    ctx.strokeStyle = 'rgba(101,68,226,0.4)'; ctx.lineWidth = 1;
+    roundRect(cx - bw/2 + 4, top + 14, bw - 8, bh - 18, 3); ctx.stroke();
+    // tiny duck dot motif in the header
+    ctx.fillStyle = '#ffcb05';
+    ctx.beginPath(); ctx.arc(cx - bw/2 + 9, top + 5.5, 2.5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + bw/2 - 9, top + 5.5, 2.5, 0, Math.PI*2); ctx.fill();
+    // message text
     const lines = b.msg || ['CUVVA'];
     ctx.fillStyle = '#6544E2'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     const longest = lines.reduce((a, c) => c.length > a.length ? c : a, '');
-    let fs = lines.length > 1 ? 12 : 16;
+    let fs = lines.length > 1 ? 15 : 21;
     ctx.font = 'bold ' + fs + 'px "Courier New", monospace';
-    while (ctx.measureText(longest).width > bw - 10 && fs > 6) { fs -= 1; ctx.font = 'bold ' + fs + 'px "Courier New", monospace'; }
-    const lh = fs + 2, startY = top + bh/2 - (lines.length - 1) * lh / 2;
-    lines.forEach((ln, i) => ctx.fillText(ln, cx, startY + i * lh + 1));
+    while (ctx.measureText(longest).width > bw - 14 && fs > 7) { fs -= 1; ctx.font = 'bold ' + fs + 'px "Courier New", monospace'; }
+    const lh = fs + 3;
+    const bodyMid = top + 14 + (bh - 14) / 2;
+    const startY = bodyMid - (lines.length - 1) * lh / 2;
+    lines.forEach((ln, i) => ctx.fillText(ln, cx, startY + i * lh));
     ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  });
+
+  // bridge: crossing road below (drawn before our road so we sit on top)
+  state.bridges.forEach(b => {
+    // full-width crossing road surface
+    ctx.fillStyle = '#3a3f4d';
+    ctx.fillRect(0, b.y, W, b.h);
+    // kerbs top and bottom
+    ctx.fillStyle = '#2c3038';
+    ctx.fillRect(0, b.y, W, 5);
+    ctx.fillRect(0, b.y + b.h - 5, W, 5);
+    // dashed centre line of the lower road
+    ctx.fillStyle = 'rgba(255,203,5,0.85)';
+    for (let x = 10; x < W; x += 46) ctx.fillRect(x, b.y + b.h/2 - 2, 24, 4);
+    // little cross-traffic cars
+    b.cars.forEach(c => {
+      ctx.save();
+      ctx.translate(c.x, b.y + c.ry);
+      ctx.fillStyle = c.color;
+      roundRect(-15, -8, 30, 16, 4); ctx.fill();
+      ctx.fillStyle = 'rgba(20,28,40,0.8)';
+      roundRect(c.dir > 0 ? 4 : -12, -5, 8, 10, 2); ctx.fill(); // windscreen toward travel
+      ctx.restore();
+    });
   });
 
   // road
@@ -635,6 +818,18 @@ function draw() {
   state.obstacles.forEach(o => { drawVehicle(o); });
   drawPlayer(player.x, player.y, player.w, player.h);
 
+  // bridge railings along our road edges (over the bridge span)
+  state.bridges.forEach(b => {
+    ctx.fillStyle = '#c9ccd6';
+    ctx.fillRect(ROAD_LEFT - 9, b.y, 6, b.h);
+    ctx.fillRect(ROAD_RIGHT + 3, b.y, 6, b.h);
+    ctx.fillStyle = '#9aa0ad';
+    for (let yy = b.y + 3; yy < b.y + b.h; yy += 15) {
+      ctx.fillRect(ROAD_LEFT - 10, yy, 8, 4);
+      ctx.fillRect(ROAD_RIGHT + 2, yy, 8, 4);
+    }
+  });
+
   // flyovers (over everything)
   state.flyovers.forEach(f => {
     const grad = ctx.createLinearGradient(0, f.y - 34, 0, f.y);
@@ -648,6 +843,16 @@ function draw() {
     ctx.fillStyle = 'rgba(255,255,255,0.85)';
     const laneY1 = f.y + f.h * 0.27, laneY2 = f.y + f.h * 0.73;
     for (let x = 6; x < W; x += 40) { ctx.fillRect(x, laneY1 - 2, 22, 4); ctx.fillRect(x, laneY2 - 2, 22, 4); }
+    // cross-traffic on the overpass
+    if (f.cars) f.cars.forEach(c => {
+      ctx.save();
+      ctx.translate(c.x, f.y + c.ry);
+      ctx.fillStyle = c.color;
+      roundRect(-15, -8, 30, 16, 4); ctx.fill();
+      ctx.fillStyle = 'rgba(20,28,40,0.8)';
+      roundRect(c.dir > 0 ? 4 : -12, -5, 8, 10, 2); ctx.fill();
+      ctx.restore();
+    });
     ctx.fillStyle = '#5a6070'; ctx.fillRect(ROAD_LEFT - 30, f.y, 16, f.h); ctx.fillRect(ROAD_RIGHT + 14, f.y, 16, f.h);
     const grad2 = ctx.createLinearGradient(0, f.y + f.h, 0, f.y + f.h + 34);
     grad2.addColorStop(0, 'rgba(0,0,0,0.3)'); grad2.addColorStop(1, 'rgba(0,0,0,0)');
@@ -686,7 +891,22 @@ function draw() {
 
 setPortrait('fuzzyStartWrap', 0);
 
-function loop() { update(); if (state.running !== undefined) draw(); requestAnimationFrame(loop); }
+function loop() {
+  update();
+  if (state.running !== undefined) {
+    // very slight speed shake above 120mph, scaling gently with speed
+    const shakeAmt = (state.running && state.mph > 120) ? 2.5 + (state.mph - 120) / 80 * 2 : 0;
+    if (shakeAmt > 0.05) {
+      ctx.save();
+      ctx.translate((Math.random() - 0.5) * shakeAmt, (Math.random() - 0.5) * shakeAmt);
+      draw();
+      ctx.restore();
+    } else {
+      draw();
+    }
+  }
+  requestAnimationFrame(loop);
+}
 // ensure first draw has a valid state
 reset(); state.running = false;
 loop();
